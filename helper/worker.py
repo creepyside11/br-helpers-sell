@@ -31,12 +31,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+WALK_INTERVAL = 5 * 60 + 30
+
+
 class OrderRunner:
-    def __init__(self, api, catalog, shutting_down=lambda: False, game_factory=RakSession):
+    def __init__(self, api, catalog, shutting_down=lambda: False, game_factory=RakSession,
+                 *, clock=time.monotonic, sleep=time.sleep):
         self.api = api
         self.catalog = catalog
         self.shutting_down = shutting_down
         self.game_factory = game_factory
+        self.clock = clock
+        self.sleep = sleep
 
     def run(self, order):
         order_id = order["id"]
@@ -51,16 +57,23 @@ class OrderRunner:
             nonlocal pulse_at
             if self.shutting_down() and not ignore_stop:
                 raise Stopped()
-            if force or time.monotonic() >= pulse_at:
+            if force or self.clock() >= pulse_at:
                 try:
                     stop = call("pulse", partial=partial)["stop"]
                 except (OSError, ValueError, KeyError) as exc:
                     if ignore_stop:
                         return
                     raise GameError("Связь с панелью потеряна. Заказ остановлен.") from exc
-                pulse_at = time.monotonic() + 2
+                pulse_at = self.clock() + 2
                 if stop and not ignore_stop:
                     raise Stopped()
+
+        def walk_if_due():
+            nonlocal next_walk
+            if self.clock() >= next_walk:
+                heartbeat(force=True)
+                market.walk_break()
+                next_walk = self.clock() + WALK_INTERVAL
 
         try:
             heartbeat(force=True)
@@ -71,9 +84,11 @@ class OrderRunner:
             session.login(order.pop("password"))
             market = Marketplace(session)
             market.open()
+            next_walk = self.clock() + WALK_INTERVAL
             while True:
                 heartbeat(force=True)
-                next_search = time.monotonic() + order["interval_seconds"]
+                walk_if_due()
+                next_search = self.clock() + order["interval_seconds"]
                 lots, partial = market.search(order["keyword"])
                 heartbeat(force=True, partial=partial)
                 for lot in matches(lots, order["keyword"], order["min_price"], order["max_price"]):
@@ -95,9 +110,10 @@ class OrderRunner:
                         call("purchase", lot_id=lot.id, outcome="declined")
                         raise
                     call("purchase", lot_id=lot.id, outcome="bought" if success else "declined")
-                while time.monotonic() < next_search:
+                while self.clock() < next_search:
                     heartbeat()
-                    time.sleep(min(0.25, max(0.0, next_search - time.monotonic())))
+                    walk_if_due()
+                    self.sleep(min(0.25, max(0.0, next_search - self.clock())))
         except Stopped:
             pass
         except GameError as exc:

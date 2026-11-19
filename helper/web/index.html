@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111213">
+  <title>RakCRMP Helper</title>
+  <link rel="stylesheet" href="/app/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/app/main.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand">RakCRMP <strong>Helper</strong></span>
+      <span class="project">BLACK RUSSIA</span>
+    </header>
+    <main>
+      <section id="gate" class="card gate">
+        <h1>Маркет</h1>
+        <p>Открой Mini App через кнопку «Маркет» в Telegram.</p>
+      </section>
+      <div id="workspace" hidden>
+        <nav class="tabs" aria-label="Навигация">
+          <button id="new-tab" type="button" aria-pressed="true">Новый заказ</button>
+          <button id="orders-tab" type="button" aria-pressed="false">Мои заказы</button>
+        </nav>
+        <section id="new-panel" aria-labelledby="new-title">
+          <div class="hero">
+            <h1 id="new-title">Что ищем?</h1>
+            <p>Задай предмет, цену и частоту поиска.</p>
+          </div>
+          <form id="order-form">
+            <div class="card fields">
+              <label for="keyword">Предмет или ключевое слово</label>
+              <input id="keyword" name="keyword" placeholder="Например, Емеля" autocomplete="off" maxlength="50" required>
+              <div class="cols">
+                <label>Цена от, ₽
+                  <input id="min-price" name="min_price" type="number" inputmode="numeric" min="0" max="100000000" value="0" required>
+                </label>
+                <label>Цена до, ₽
+                  <input id="max-price" name="max_price" type="number" inputmode="numeric" min="0" max="100000000" placeholder="300 000" required>
+                </label>
+              </div>
+              <fieldset class="mode">
+                <legend>При совпадении</legend>
+                <div class="cols picks">
+                  <label><input name="mode" type="radio" value="notify" checked><span>Уведомить</span></label>
+                  <label><input name="mode" type="radio" value="buy"><span>Автопокупка</span></label>
+                </div>
+              </fieldset>
+              <div class="interval">
+                <label for="interval">Интервал проверки</label>
+                <output id="interval-value" for="interval">30 сек.</output>
+              </div>
+              <input id="interval" name="interval_seconds" type="range" min="5" max="60" value="30">
+              <div class="slider-labels"><span>5 сек.</span><span>60 сек.</span></div>
+            </div>
+            <div class="card fields">
+              <div class="section-line"><h2>Игровой аккаунт</h2><span class="level">3+ уровень</span></div>
+              <label for="server">Сервер</label>
+              <select id="server" name="server_id" required>
+                <option value="">Загружаем серверы…</option>
+              </select>
+              <button id="retry-servers" class="secondary" type="button" hidden>Загрузить снова</button>
+              <label for="nickname">Ник</label>
+              <input id="nickname" name="nickname" placeholder="Name_Surname" autocomplete="off" autocapitalize="off"
+                     spellcheck="false" pattern="[A-Za-z0-9_]{3,20}" minlength="3" maxlength="20" required>
+              <label for="password">Пароль от аккаунта</label>
+              <div class="secret">
+                <input id="password" name="password" type="password" maxlength="72" autocomplete="new-password" required>
+                <button id="toggle-password" type="button" class="link" aria-controls="password" aria-pressed="false">Показать</button>
+              </div>
+              <p class="hint">Пароль передаётся воркеру для входа и удаляется из очереди.</p>
+            </div>
+            <p id="form-error" class="error" role="alert" hidden></p>
+            <button id="submit-order" class="primary" type="submit">Запустить поиск</button>
+          </form>
+        </section>
+        <section id="orders-panel" aria-labelledby="orders-title" hidden>
+          <div class="hero orders-heading">
+            <div><h1 id="orders-title">Мои заказы</h1><p>Совпадения, покупки и статус работы.</p></div>
+            <button id="refresh-orders" type="button" class="secondary">Обновить</button>
+          </div>
+          <p id="orders-feedback" class="hint" role="status" hidden></p>
+          <div id="order-list" class="order-list"></div>
+          <button id="more-orders" type="button" class="secondary stretch" hidden>Показать ещё</button>
+        </section>
+      </div>
+    </main>
+  </div>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-detail"></p>
+    <form method="dialog">
+      <button class="secondary" value="cancel">Отмена</button>
+      <button class="primary" value="yes" id="confirm-action"></button>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

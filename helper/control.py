@@ -14,6 +14,7 @@ from starlette.routing import Route
 
 from .common import MAX_PRICE, ServerCatalog, public_https
 from .db import Conflict, Database
+from .miniapp import mini_routes
 from .telegram import Controller, Telegram
 
 SECRET_HEADERS = {
@@ -99,7 +100,7 @@ def worker_action(db, op, token, data):
     raise ValueError("unknown operation")
 
 
-def create_app(controller, run_telegram=True):
+def create_app(controller, run_telegram=True, *, bot_token=None):
     db = controller.db
 
     @asynccontextmanager
@@ -162,6 +163,7 @@ def create_app(controller, run_telegram=True):
         Route("/health", health),
         Route("/form/{token}", form, methods=["GET", "POST"]),
         Route("/worker/{op}", worker, methods=["POST"]),
+        *mini_routes(controller, bot_token),
     ], lifespan=lifespan)
 
 
@@ -175,7 +177,8 @@ def main():
     db = Database(os.environ["DATABASE_URL"], cipher)
     controller = Controller(db, ServerCatalog(), cipher, Telegram(token), int(os.environ["ADMIN_ID"]),
                             public_https(os.environ["PUBLIC_WORKER_URL"]))
-    uvicorn.run(create_app(controller), host=os.environ.get("LISTEN_HOST", "127.0.0.1"),
+    uvicorn.run(create_app(controller, bot_token=token),
+                host=os.environ.get("LISTEN_HOST", "127.0.0.1"),
                 port=int(os.environ.get("PORT", "8080")), access_log=False)
 
 

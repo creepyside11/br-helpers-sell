@@ -1,4 +1,5 @@
 """Single-account adapter for the Black Russia tablet and marketplace."""
+import math
 import queue
 import sys
 import time
@@ -99,6 +100,8 @@ class RakSession:
 
     def _on_event(self, event, *args, **kwargs):
         item = None
+        if event in ("OnSetPosition", "onShowDialog", "onKick", "disconnect"):
+            self.session.players.bot.coord_movement.cancel(reason=event)
         if event == "onReceiveJSON" and args[0] in (AUTH, SPAWN, TABLET, MARKET, 26):
             item = (args[0], args[1])
         elif event in ("disconnect", "onKick"):
@@ -170,7 +173,55 @@ class RakSession:
         self.session._sender.send(packet, rpc_name="picked_up_interact")
         return self.wait(lambda iid, data: iid == TABLET and data.get("o") == 1)
 
+    def can_take_step(self):
+        player = self.session.players.bot
+        x, y, z = player.get_position()
+        return (
+            self.session.connected and self.session.sync.enabled and player.is_onfoot()
+            and player.health > 0 and all(map(math.isfinite, (x, y, z, player.rotation)))
+            and math.hypot(x, y) > 1 and -5 < z < 400
+            and player.coord_movement.get_active() is None
+        )
+
+    def take_short_walk(self):
+        if not self.can_take_step():
+            return
+        player = self.session.players.bot
+        origin = player.get_position()
+        angle = math.radians(player.rotation)
+        target = (origin[0] - math.sin(angle) * .72, origin[1] + math.cos(angle) * .72, origin[2])
+        for destination in (target, origin):
+            self.check()
+            if not self.can_take_step():
+                return
+            movement = player.coord_movement
+            state, _ = movement.start(
+                destination, mode="walk", nominal_interval=.5, overrides={
+                    "coord_delay": .45, "accel_time": .2, "brake_time": 0.0,
+                    "coord_fluctuation_max": 0.0, "movement_direction_control": (False, True, 0),
+                    "stop_on_dialog": True,
+                },
+            )
+            movement_id = state["movement_id"]
+            end = time.monotonic() + 4.5
+            try:
+                while time.monotonic() < end:
+                    self.check()
+                    if not self.session.connected:
+                        raise GameError("Сервер отключил игровой аккаунт.")
+                    result = movement.get_result(movement_id)
+                    if result is not None:
+                        if result["status"] != "arrived":
+                            return
+                        break
+                    time.sleep(.1)
+                else:
+                    return
+            finally:
+                movement.cancel(movement_id)
+
     def close(self):
+        self.session.players.bot.coord_movement.cancel(reason="disconnect")
         self.session.disconnect()
 
 
@@ -194,6 +245,12 @@ class Marketplace:
         self.game.wait(lambda iid, data: iid == MARKET and data.get("o") == 1)
         self.game.send(MARKET, MARKET_SORT)
         self._page()
+
+    def walk_break(self):
+        if self.game.can_take_step():
+            self.game.send(MARKET, {"c": 1})
+            self.game.take_short_walk()
+            self.open()
 
     def _page(self):
         return self.game.wait(lambda iid, data: iid == MARKET and data.get("t") == 2

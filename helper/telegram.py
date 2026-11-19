@@ -169,9 +169,10 @@ class Controller:
             pass
 
     def start(self, owner):
-        self.tg.send(owner, "RakCRMP Helper\nПоиск лотов на маркете Black Russia.", {
-            "keyboard": [[{"text": NEW}, {"text": ORDERS}]], "resize_keyboard": True,
-        })
+        self.tg.send(owner, "RakCRMP Helper\nСоздавай заказы и следи за лотами в приложении.", buttons(
+            [{"text": "Открыть Mini App", "web_app": {"url": self.public_url + "/app"}}],
+            [button(NEW, "new_order"), button(ORDERS, f"list:{MAX_ID}")],
+        ))
 
     def servers(self, owner, draft, page):
         rows = list(self.catalog.get().values())
@@ -308,6 +309,9 @@ class Controller:
             self.tg.send(owner, "Используй кнопки текущего шага или /cancel.")
 
     def callback(self, owner, data):
+        if data == "new_order":
+            self.message(owner, "/new", 0)
+            return
         if data == "admin":
             self.admin(owner)
             return
@@ -387,8 +391,19 @@ class Controller:
 
     def poll(self, stop):
         offset = None
+        menu_pending = True
+        menu_retry_at = 0.0
         stop.wait(.1)
         while not stop.is_set():
+            if menu_pending and time.monotonic() >= menu_retry_at:
+                try:
+                    self.tg.call("setChatMenuButton", menu_button={
+                        "type": "web_app", "text": "Маркет", "web_app": {"url": self.public_url + "/app"},
+                    })
+                    menu_pending = False
+                except TelegramError as exc:
+                    print(f"Mini App menu registration: {exc}", flush=True)
+                    menu_retry_at = time.monotonic() + 60
             try:
                 events = self.tg.call("getUpdates", http_timeout=22, timeout=15,
                                       offset=offset or 0, allowed_updates=["message", "callback_query"])
