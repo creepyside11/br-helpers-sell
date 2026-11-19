@@ -68,7 +68,7 @@ class TelegramFlowTest(unittest.TestCase):
             url = tg.transcript[-1][2]["inline_keyboard"][0][0]["url"]
             path = "/" + url.split("/", 3)[-1]
             self.assertEqual(web.get(path).status_code, 200)
-            self.assertEqual(web.post(path, data={"password": "test&secret?"}).status_code, 200)
+            self.assertEqual(web.post(path, headers={"Origin": "null", "Sec-Fetch-Site": "same-origin"}, data={"password": "test&secret?"}).status_code, 200)
             self.assertEqual(web.get(path).status_code, 404)
             self.assertEqual(web.post(path, data={"password": "second"}).status_code, 400)
             control.message(1, "Емеля", 3)
@@ -114,10 +114,24 @@ class TelegramFlowTest(unittest.TestCase):
                 self.assertEqual(page.status_code, 200)
                 self.assertNotIn("fingerprint", page.text)
                 fields = {"host": "8.8.8.8", "username": "worker", "password": "fake-password"}
-                self.assertEqual(web.post(path, data=fields).status_code, 200)
+                browser = {"Origin": "null", "Sec-Fetch-Site": "same-origin"}
+                for foreign in ({"Origin": "https://other.example"}, {"Origin": "null", "Sec-Fetch-Site": "cross-site"}):
+                    self.assertEqual(web.post(path, headers=foreign, data=fields).status_code, 403)
+                invalid = web.post(path, headers=browser, data={**fields, "host": "8.8.8.8:22"})
+                self.assertEqual(invalid.status_code, 400)
+                self.assertIn('value="worker"', invalid.text)
+                self.assertIn("без порта", invalid.text)
+                self.assertNotIn("fake-password", invalid.text)
+                install.assert_not_called()
+                success = web.post(path, headers=browser, data=fields)
+                self.assertEqual(success.status_code, 200)
+                self.assertIn("Установка запущена", success.text)
                 self.assertTrue(attempted.wait(2))
                 install.assert_called_once_with(2, ("8.8.8.8", "worker", "fake-password"))
-                self.assertEqual(web.post(path, data=fields).status_code, 400)
+                replay = web.post(path, headers=browser, data=fields)
+                self.assertEqual(replay.status_code, 400)
+                self.assertIn("Ссылка уже использована или истекла", replay.text)
+                self.assertNotIn("<form", replay.text)
 
     def test_ssh_install_persists_host_keys_between_calls(self):
         with tempfile.TemporaryDirectory() as data_dir, patch.dict(os.environ, {"DATA_DIR": data_dir}):

@@ -17,7 +17,10 @@ USERNAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_-]{0,31}\Z")
 
 
 def validate_ssh(host, username, password):
-    address = ipaddress.ip_address(host.strip())
+    try:
+        address = ipaddress.ip_address(host.strip())
+    except ValueError:
+        raise ValueError("Введи публичный IP VPS без порта.") from None
     if not address.is_global:
         raise ValueError("Требуется публичный IP VPS.")
     if not USERNAME.fullmatch(username.strip()):

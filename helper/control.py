@@ -40,13 +40,26 @@ def page(body, status=200):
     )
 
 
-def form_html(kind):
+def form_html(kind, *, values=None, error=None):
+    values = values or {}
     password = '<label>Пароль<input name="password" type="password" required maxlength="256" autocomplete="off"></label>'
     fields = ""
     if kind == "vps":
-        fields = ('<label>Публичный IP VPS<input name="host" maxlength="45" required></label>'
-                  '<label>SSH-логин<input name="username" maxlength="32" required></label>')
-    return page(f'<form method="post" autocomplete="off">{fields}{password}<button>Отправить</button></form>')
+        host = html.escape(values.get("host", "")[:45], quote=True)
+        login = html.escape(values.get("username", "")[:32], quote=True)
+        fields = (
+            f'<label>Публичный IP VPS<input name="host" maxlength="45" value="{host}" required></label>'
+            f'<label>SSH-логин<input name="username" maxlength="32" value="{login}" required></label>'
+        )
+    feedback = f'<p role="alert">{html.escape(error)}</p>' if error else ""
+    return page(
+        f'{feedback}<form method="post" autocomplete="off">{fields}{password}<button>Отправить</button></form>',
+        400 if error else 200,
+    )
+
+
+def expired_form(status):
+    return page("<p>Ссылка уже использована или истекла. Для новой отправки открой форму из Telegram заново.</p>", status)
 
 
 async def body_bytes(request, max_bytes=4096):
@@ -121,20 +134,31 @@ def create_app(controller, run_telegram=True, *, bot_token=None):
 
     async def form(request):
         token = request.path_params["token"]
+        if request.method == "POST":
+            # no-referrer serializes Origin as "null" for a native HTML form
+            # navigation. The unique, single-use form URL authorizes the request.
+            origin = request.headers.get("origin")
+            site = request.headers.get("sec-fetch-site")
+            if origin not in (None, "null", controller.public_url) or site in ("cross-site", "same-site"):
+                return page("<p>Открой форму по ссылке из Telegram.</p>", 403)
+        kind = await run_in_threadpool(controller.form_kind, token)
+        if kind is None:
+            return expired_form(404 if request.method == "GET" else 400)
         if request.method == "GET":
-            kind = await run_in_threadpool(controller.form_kind, token)
-            return form_html(kind) if kind else page("<p>Ссылка истекла. Открой форму в Telegram заново.</p>", 404)
+            return form_html(kind)
+
+        fields = {}
         try:
             if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
                 raise ValueError("Неверный формат формы.")
-            if request.headers.get("origin") not in (None, controller.public_url):
-                raise ValueError("Открой форму по ссылке из Telegram.")
             values = parse_qs((await body_bytes(request)).decode(), keep_blank_values=True, max_num_fields=6)
             fields = {key: value[0] for key, value in values.items() if len(value) == 1}
             message = await run_in_threadpool(controller.submit_form, token, fields)
             return page(f"<p>{html.escape(message)}</p>")
         except (ValueError, ClientDisconnect) as exc:
-            return page(f"<p>{html.escape(str(exc))}</p><p>Вернись к форме, чтобы попробовать ещё раз.</p>", 400)
+            if await run_in_threadpool(controller.form_kind, token) is None:
+                return expired_form(400)
+            return form_html(kind, values=fields, error=str(exc) or "Не удалось принять данные формы.")
 
     async def worker(request):
         token = request.headers.get("authorization", "")
