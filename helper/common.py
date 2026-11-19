@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 MAX_PRICE = 100_000_000
@@ -23,6 +24,10 @@ class Server:
     short: str
     host: str
     port: int
+
+
+def data_directory():
+    return Path(os.environ.get("DATA_DIR") or Path(__file__).resolve().parents[1] / "data").resolve()
 
 
 def public_https(value):

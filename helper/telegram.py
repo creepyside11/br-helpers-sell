@@ -130,7 +130,7 @@ class Controller:
             else:
                 if owner != self.admin_id:
                     raise ValueError("Недостаточно прав.")
-                creds = validate_ssh(*(fields.get(k, "") for k in ("host", "username", "fingerprint", "password")))
+                creds = validate_ssh(*(fields.get(k, "") for k in ("host", "username", "password")))
                 if not self.install_lock.acquire(blocking=False):
                     raise ValueError("Уже выполняется установка. Подожди её завершения.")
                 self.forms.pop(digest)
@@ -318,7 +318,7 @@ class Controller:
         if data == "vps":
             if owner == self.admin_id:
                 url = self._form(owner, "vps")
-                self.tg.send(owner, "Заполни данные VPS. Для проверки SSH нужен SHA256-отпечаток ключа сервера.",
+                self.tg.send(owner, "Заполни IP, SSH-логин и пароль от VPS.",
                              buttons([{"text": "Открыть форму VPS", "url": url}]))
             return
         parts = data.split(":")

@@ -3,7 +3,6 @@ import json
 import os
 import threading
 from contextlib import asynccontextmanager
-from pathlib import Path
 from urllib.parse import parse_qs
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -11,7 +10,7 @@ from starlette.requests import ClientDisconnect
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
-from .common import MAX_PRICE, ServerCatalog, public_https
+from .common import MAX_PRICE, ServerCatalog, data_directory, public_https
 from .credentials import load_cipher
 from .db import Conflict, Database
 from .miniapp import mini_routes
@@ -46,8 +45,7 @@ def form_html(kind):
     fields = ""
     if kind == "vps":
         fields = ('<label>Публичный IP VPS<input name="host" maxlength="45" required></label>'
-                  '<label>SSH-логин<input name="username" maxlength="32" required></label>'
-                  '<label>SHA256-отпечаток SSH-ключа<input name="fingerprint" placeholder="SHA256:…" maxlength="50" required></label>')
+                  '<label>SSH-логин<input name="username" maxlength="32" required></label>')
     return page(f'<form method="post" autocomplete="off">{fields}{password}<button>Отправить</button></form>')
 
 
@@ -174,8 +172,7 @@ def main():
     if not token or "/" in token:
         raise ValueError("Некорректный BOT_TOKEN")
     db = Database(os.environ["DATABASE_URL"], None)
-    data_dir = os.environ.get("DATA_DIR") or Path(__file__).resolve().parents[1] / "data"
-    cipher = load_cipher(data_dir, os.environ.get("DATABASE_KEY"),
+    cipher = load_cipher(data_directory(), os.environ.get("DATABASE_KEY"),
                          has_pending_passwords=db.has_pending_passwords)
     db.cipher = cipher
     controller = Controller(db, ServerCatalog(), cipher, Telegram(token), int(os.environ["ADMIN_ID"]),

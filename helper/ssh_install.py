@@ -1,50 +1,30 @@
-"""Install an authenticated worker on a VPS via pinned SSH."""
-import base64
-import hashlib
-import hmac
+"""Install a VPS worker using a persistent OpenSSH known_hosts file."""
 import io
 import ipaddress
 import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import tarfile
 import tempfile
 
+from .common import data_directory
+
 ROOT = Path(__file__).resolve().parents[1]
-FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}\Z")
 USERNAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_-]{0,31}\Z")
 
 
-def validate_ssh(host, username, fingerprint, password):
+def validate_ssh(host, username, password):
     address = ipaddress.ip_address(host.strip())
     if not address.is_global:
         raise ValueError("Требуется публичный IP VPS.")
-    if not USERNAME.fullmatch(username.strip()) or not FINGERPRINT.fullmatch(fingerprint.strip()):
-        raise ValueError("Проверь SSH-логин и SHA256 отпечаток сервера.")
+    if not USERNAME.fullmatch(username.strip()):
+        raise ValueError("Проверь SSH-логин.")
     if not 1 <= len(password) <= 256 or any(ch in password for ch in ("\x00", "\r", "\n")):
         raise ValueError("Проверь пароль SSH.")
-    return str(address), username.strip(), fingerprint.strip(), password
-
-
-def _known_host(host, fingerprint):
-    scan = subprocess.run(
-        ["ssh-keyscan", "-T", "6", "-t", "ed25519,ecdsa,rsa", host],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=16, check=False,
-    )
-    for line in scan.stdout.decode("ascii", errors="ignore").splitlines():
-        fields = line.split()
-        if len(fields) != 3 or fields[0] != host:
-            continue
-        try:
-            key = base64.b64decode(fields[2], validate=True)
-        except ValueError:
-            continue
-        actual = "SHA256:" + base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
-        if hmac.compare_digest(actual, fingerprint):
-            return line + "\n", fields[1]
-    raise RuntimeError("SSH-ключ не совпал с проверенным отпечатком.")
+    return str(address), username.strip(), password
 
 
 def _archive(url, token, catalog):
@@ -66,20 +46,25 @@ def _archive(url, token, catalog):
     return archive.getvalue()
 
 
-def install_worker(host, username, fingerprint, password, url, token, catalog=""):
-    known, key_type = _known_host(host, fingerprint)
-    if key_type == "ssh-rsa":
-        key_type = "rsa-sha2-512,rsa-sha2-256"
+def install_worker(host, username, password, url, token, catalog=""):
+    ssh_dir = data_directory() / "ssh"
+    ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    known_path = ssh_dir / "known_hosts"
+    fd = os.open(known_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError("Хранилище SSH-ключей должно быть обычным файлом.")
+    finally:
+        os.close(fd)
+    # First contact adds the key; subsequent installs must match it.
     with tempfile.TemporaryDirectory(prefix="helper-ssh-") as staging:
         stage = Path(staging)
-        known_path = stage / "known_hosts"
-        known_path.write_text(known)
         askpass = stage / "askpass"
         askpass.write_text('#!/bin/sh\nprintf "%s\\n" "$RAK_HELPER_SSH_PASSWORD"\n')
         askpass.chmod(0o700)
         options = {
             "UserKnownHostsFile": str(known_path), "GlobalKnownHostsFile": "/dev/null",
-            "StrictHostKeyChecking": "yes", "HostKeyAlgorithms": key_type,
+            "StrictHostKeyChecking": "accept-new", "UpdateHostKeys": "no", "HashKnownHosts": "yes",
             "ConnectTimeout": "10", "NumberOfPasswordPrompts": "1",
             "PreferredAuthentications": "password", "PubkeyAuthentication": "no",
             "ClearAllForwardings": "yes", "ServerAliveInterval": "15", "ServerAliveCountMax": "2",
@@ -101,7 +86,9 @@ sh deploy/install_worker.sh
         result = subprocess.run(
             args + ["-l", username, host, command],
             input=_archive(url, token, catalog), stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, env=env, timeout=240, start_new_session=True,
+            stderr=subprocess.PIPE, env=env, timeout=240, start_new_session=True,
         )
         if result.returncode:
+            if b"REMOTE HOST IDENTIFICATION HAS CHANGED" in result.stderr:
+                raise RuntimeError("SSH-ключ VPS изменился. Проверь новый ключ в панели провайдера.")
             raise RuntimeError("Установка не завершилась. Проверь SSH, sudo и systemd на VPS.")

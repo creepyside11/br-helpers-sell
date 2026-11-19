@@ -1,7 +1,11 @@
 import io
 import os
+import tempfile
+import threading
 import tarfile
 import unittest
+from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -11,7 +15,7 @@ from helper.common import MAX_PRICE, Server, parse_integer
 from helper.control import create_app
 from helper.db import Conflict, Database
 from helper.game import GameError, Marketplace, PurchaseUncertain, RakSession, matches
-from helper.ssh_install import _archive
+from helper.ssh_install import _archive, install_worker
 from helper.telegram import Controller
 from helper.worker import OrderRunner
 
@@ -97,6 +101,35 @@ class TelegramFlowTest(unittest.TestCase):
         self.assertFalse(control.forms)
         control.callback(2, "vps")
         self.assertEqual(len(control.forms), 1)
+
+    def test_vps_form_accepts_ip_login_and_password(self):
+        control = Controller(FakeDB(), Catalog(), None, FakeTelegram(), 2, "https://helper.example.com")
+        attempted = threading.Event()
+        with patch.object(control, "_install", side_effect=lambda *_: attempted.set()) as install:
+            with TestClient(create_app(control, run_telegram=False)) as web:
+                control.callback(2, "vps")
+                url = control.tg.transcript[-1][2]["inline_keyboard"][0][0]["url"]
+                path = "/" + url.split("/", 3)[-1]
+                page = web.get(path)
+                self.assertEqual(page.status_code, 200)
+                self.assertNotIn("fingerprint", page.text)
+                fields = {"host": "8.8.8.8", "username": "worker", "password": "fake-password"}
+                self.assertEqual(web.post(path, data=fields).status_code, 200)
+                self.assertTrue(attempted.wait(2))
+                install.assert_called_once_with(2, ("8.8.8.8", "worker", "fake-password"))
+                self.assertEqual(web.post(path, data=fields).status_code, 400)
+
+    def test_ssh_install_persists_host_keys_between_calls(self):
+        with tempfile.TemporaryDirectory() as data_dir, patch.dict(os.environ, {"DATA_DIR": data_dir}):
+            with patch("helper.ssh_install.subprocess.run", return_value=CompletedProcess([], 0, stderr=b"")) as run:
+                for _ in range(2):
+                    install_worker("8.8.8.8", "worker", "fake-password", "https://helper.example.com", "fixture")
+                known_hosts = Path(data_dir).resolve() / "ssh" / "known_hosts"
+                self.assertTrue(known_hosts.is_file())
+                self.assertEqual(known_hosts.stat().st_mode & 0o777, 0o600)
+                for call in run.call_args_list:
+                    self.assertIn(f"UserKnownHostsFile={known_hosts}", call.args[0])
+                    self.assertIn("StrictHostKeyChecking=accept-new", call.args[0])
 
 
 class ReplayGame:
@@ -250,6 +283,10 @@ class PostgresFlowTest(unittest.TestCase):
         self.assertFalse(db.observe(token, order, 18, "Емеля", 200000))
         self.assertTrue(db.reserve(token, order, 18, 200000))
         self.assertFalse(db.reserve(token, order, 18, 200000))
+        self.assertTrue(db.observe(token, order, 19, "Емеля", 210000))
+        self.assertTrue(db.reserve(token, order, 19, 210000))
+        db.purchase(token, order, 19, "declined")
+        self.assertEqual(db.alerts(), [])
         db.stop(1, order)
         self.assertTrue(db.pulse(token, order))
         db.purchase(token, order, 18, "bought")
@@ -258,6 +295,13 @@ class PostgresFlowTest(unittest.TestCase):
         self.assertEqual(db.order(1, order)["bought"], 1)
         self.assertEqual(db.order(1, order)["status"], "stopped")
         self.assertEqual(len(db.alerts()), 1)
+        stop = threading.Event()
+        tg = FakeTelegram()
+        control = Controller(db, Catalog(), db.cipher, tg, 2, "https://helper.example.com")
+        with patch.object(stop, "wait", side_effect=lambda _: stop.set()):
+            control.alarms(stop)
+        self.assertEqual(tg.transcript, [(1, f"🛒 Заказ #{order}. Куплен лот «Емеля» за 200 000 ₽. Забери его в пункте выдачи.", None)])
+        self.assertEqual(db.alerts(), [])
         with db.cursor() as cur:
             cur.execute("SELECT password_cipher FROM helper_orders WHERE id=%s", (order,))
             self.assertIsNone(cur.fetchone()["password_cipher"])
