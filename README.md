@@ -13,10 +13,13 @@ pip install -r requirements.txt
 
 cp .env.example .env
 chmod 600 .env
-python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
 ```
 
-Заполни `BOT_TOKEN`, `ADMIN_ID`, `DATABASE_URL`, `DATABASE_KEY` и `PUBLIC_WORKER_URL` в `.env`. В последний впиши публичный HTTPS-адрес без пути. Сгенерированный ключ нужно сохранить в окружении управляющего процесса. При его смене оставшиеся зашифрованные пароли в очереди станут недоступны.
+Заполни `BOT_TOKEN`, `ADMIN_ID`, `DATABASE_URL` и `PUBLIC_WORKER_URL` в `.env`. В последний впиши публичный HTTPS-адрес без пути. Из настроек PostgreSQL достаточно `DATABASE_URL`.
+
+Бот сам создаёт ключ шифрования игровых паролей в `data/game-passwords.key` (на Bothost — `/app/data/game-passwords.key`). При переносе управляющего сервиса сохрани этот файл вместе с данными. Для другого каталога задай `DATA_DIR`.
+
+Если в старой установке уже задан `DATABASE_KEY`, оставь его на первом запуске обновления. Бот перенесёт действующий ключ в файл. После успешного запуска переменную можно удалить.
 
 ```bash
 set -a
@@ -72,7 +75,7 @@ python -m unittest discover -s tests -v
 
 1. Подключи репозиторий `creepyside11/br-helpers-sell`, ветку `main`. Включи **Использовать собственный Dockerfile**. Он устанавливает SSH-клиент для кнопки **Установить на VPS**.
 2. В панели привяжи домен `rakcrmphelper.bothost.tech` и выставь внутренний порт **3000**. Приложение слушает `0.0.0.0` и читает `PORT` из окружения.
-3. Добавь `BOT_TOKEN`, `ADMIN_ID`, `DATABASE_URL` и `DATABASE_KEY`. Значения для домена и порта приведены в [.bothost.env.example](.bothost.env.example). Для уже работающей базы сохрани прежний `DATABASE_KEY`, чтобы воркер мог получить ожидающие заказы.
+3. Добавь `BOT_TOKEN`, `ADMIN_ID` и `DATABASE_URL`. Значения для домена и порта приведены в [.bothost.env.example](.bothost.env.example). Ключ шифрования бот хранит в постоянной папке `/app/data`. При обновлении старой установки перенеси прежний `DATABASE_KEY` по инструкции выше.
 4. Разверни проект. Проверка сервиса доступна по адресу `https://rakcrmphelper.bothost.tech/health`.
 5. В личном чате с ботом открой меню **Маркет** или отправь `/start` и нажми **Открыть Mini App**. Заказы в приложении и чате общие. Если Telegram требует привязать домен к боту, добавь публичный URL в настройках Menu Button в BotFather.
 

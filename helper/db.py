@@ -33,6 +33,14 @@ class Database:
             cur.execute("SELECT pg_advisory_xact_lock(544422651)")
             cur.execute(Path(__file__).with_name("schema.sql").read_text())
 
+    def has_pending_passwords(self):
+        with self.cursor() as cur:
+            cur.execute("SELECT to_regclass('helper_orders') IS NOT NULL AS initialized")
+            if not cur.fetchone()["initialized"]:
+                return False
+            cur.execute("SELECT EXISTS(SELECT 1 FROM helper_orders WHERE password_cipher IS NOT NULL) AS pending")
+            return cur.fetchone()["pending"]
+
     def create(self, user_id, settings):
         from psycopg2.errors import UniqueViolation
 

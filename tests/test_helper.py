@@ -235,10 +235,13 @@ class PostgresFlowTest(unittest.TestCase):
         settings = {"server_id": 7, "server_name": "BLUE", "nickname": "Test_Player",
                     "password_cipher": db.cipher.encrypt(b"fixture"), "keyword": "емеля",
                     "mode": "buy", "min_price": 0, "max_price": 300000, "interval_seconds": 5}
+        self.assertFalse(db.has_pending_passwords())
         order = db.create(1, settings)
+        self.assertTrue(db.has_pending_passwords())
         with self.assertRaises(Conflict):
             db.create(2, settings)
         self.assertEqual(db.claim(token)["password"], "fixture")
+        self.assertFalse(db.has_pending_passwords())
         self.assertIsNone(db.claim(other_token))
         self.assertIsNone(db.stop(2, order))
         with self.assertRaises(Conflict):

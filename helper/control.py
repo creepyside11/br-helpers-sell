@@ -3,9 +3,8 @@ import json
 import os
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import parse_qs
-
-from cryptography.fernet import Fernet
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -13,6 +12,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from .common import MAX_PRICE, ServerCatalog, public_https
+from .credentials import load_cipher
 from .db import Conflict, Database
 from .miniapp import mini_routes
 from .telegram import Controller, Telegram
@@ -173,8 +173,11 @@ def main():
     token = os.environ["BOT_TOKEN"]
     if not token or "/" in token:
         raise ValueError("Некорректный BOT_TOKEN")
-    cipher = Fernet(os.environ["DATABASE_KEY"].encode())
-    db = Database(os.environ["DATABASE_URL"], cipher)
+    db = Database(os.environ["DATABASE_URL"], None)
+    data_dir = os.environ.get("DATA_DIR") or Path(__file__).resolve().parents[1] / "data"
+    cipher = load_cipher(data_dir, os.environ.get("DATABASE_KEY"),
+                         has_pending_passwords=db.has_pending_passwords)
+    db.cipher = cipher
     controller = Controller(db, ServerCatalog(), cipher, Telegram(token), int(os.environ["ADMIN_ID"]),
                             public_https(os.environ["PUBLIC_WORKER_URL"]))
     uvicorn.run(create_app(controller, bot_token=token),
