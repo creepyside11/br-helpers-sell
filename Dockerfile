@@ -7,8 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+COPY main.py .
 COPY helper ./helper
 COPY runtime ./runtime
 COPY deploy ./deploy
 EXPOSE 3000
-CMD ["python", "-m", "helper.control"]
+CMD ["python", "main.py"]
