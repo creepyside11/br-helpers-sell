@@ -1,0 +1,138 @@
+from .constants import PacketReliability, PacketPriority
+
+UNREL = PacketReliability.UNRELIABLE
+UNREL_SEQ = PacketReliability.UNRELIABLE_SEQUENCED
+REL = PacketReliability.RELIABLE
+REL_ORD = PacketReliability.RELIABLE_ORDERED
+REL_SEQ = PacketReliability.RELIABLE_SEQUENCED
+
+PRI_SYS = PacketPriority.SYSTEM_PRIORITY
+PRI_HIGH = PacketPriority.HIGH_PRIORITY
+PRI_MED = PacketPriority.MEDIUM_PRIORITY
+PRI_LOW = PacketPriority.LOW_PRIORITY
+
+PACKET_DELIVERY = {
+    "interface_spawn_select": (REL, PRI_SYS, 0),
+    "interface_npc_dialog_response": (REL, PRI_SYS, 0),
+    "interface_shop_food": (REL, PRI_SYS, 0),
+    "interface_get_free_reward": (REL, PRI_SYS, 0),
+    "interface_donat_menu_close": (REL, PRI_SYS, 0),
+    "interface_case_open": (REL, PRI_SYS, 0),
+    "interface_case_collect_reward": (REL, PRI_SYS, 0),
+    "interface_case_menu_close": (REL, PRI_SYS, 0),
+    "interface_dialog_menu_select": (REL, PRI_SYS, 0),
+    "interface_call_notification_response": (REL, PRI_SYS, 0),
+    "interface_notification_response": (REL, PRI_SYS, 0),
+    "interface_reward_take": (REL, PRI_SYS, 0),
+    "interface_close_reward": (REL, PRI_SYS, 0),
+    # Авторизация и регистрация: сервер принимает их только как RELIABLE
+    # SYSTEM_PRIORITY. На REL_ORD/MEDIUM пакет доходит, но обработчик его
+    # игнорирует — ответа нет вообще.
+    "interface_auth_password": (REL, PRI_SYS, 0),
+    "interface_register_password": (REL, PRI_SYS, 0),
+    "interface_register_unknown_after_password": (REL, PRI_SYS, 0),
+    "interface_register_referral": (REL, PRI_SYS, 0),
+    "interface_register_gender": (REL, PRI_SYS, 0),
+    "interface_register_skin": (REL, PRI_SYS, 0),
+    "interface_register_finish": (REL, PRI_SYS, 0),
+    "interface_cinematic_stop": (REL, PRI_HIGH, 0),
+    "interface_sync": (REL_ORD, PRI_MED, 0),
+    # Tablet and market requests in the game capture use RELIABLE.
+    "interface_market": (REL, PRI_SYS, 0),
+    # Синхронизация позиции — SYSTEM_PRIORITY не ради приоритета, а ради
+    # немедленной отправки: HIGH/MEDIUM копятся в очереди и уезжают пачкой
+    # на следующем проходе сети. В ECO-режиме проход раз в 167 мс, поэтому
+    # 50 пакетов в секунду уходили 12 датаграммами по 4-5 пакетов (иногда 6
+    # в одной), а живой клиент шлёт ровно один sync в датаграме — 82% его
+    # датаграмов содержат один on-foot sync (_diag/route2.pcap). Пачку из
+    # восьми позиций с одним временем прихода сервер видит как телепорт.
+    "player_sync": (UNREL_SEQ, PRI_SYS, 0),
+    "vehicle_sync": (UNREL_SEQ, PRI_SYS, 0),
+    "passenger_sync": (UNREL_SEQ, PRI_SYS, 0),
+    "connection_request": (REL, PRI_SYS, 0),
+    "auth_key_response": (REL, PRI_SYS, 0),
+    "new_incoming_connection": (REL, PRI_HIGH, 0),
+    "internal_ping": (UNREL, PRI_HIGH, 0),
+    "connected_pong": (UNREL, PRI_SYS, 0),
+    "received_static_data": (REL, PRI_HIGH, 0),
+    "detect_lost_connections": (REL, PRI_HIGH, 0),
+    "disconnection_notification": (REL, PRI_SYS, 0),
+}
+
+RPC_DELIVERY = {
+    # Спавн: только RELIABLE SYSTEM_PRIORITY. На REL_ORD/MEDIUM сервер пакет
+    # получает, но не отвечает — мир не стримится, в /tab нас нет.
+    "spawn": (REL, PRI_SYS, 0),
+    "client_join": (REL, PRI_MED, 0),
+    "enter_vehicle": (REL_SEQ, PRI_SYS, 0),
+    "exit_vehicle": (REL_SEQ, PRI_SYS, 0),
+    "request_class": (REL, PRI_MED, 0),
+    "send_chat": (REL, PRI_MED, 0),
+    "server_command": (REL, PRI_MED, 0),
+    "update_scores_and_pings": (REL, PRI_MED, 0),
+    "picked_up_pickup": (REL, PRI_MED, 0),
+    "picked_up_interact": (REL, PRI_MED, 0),
+    "death_notification": (REL, PRI_MED, 0),
+    # Ответ на диалог — как и спавн, только RELIABLE SYSTEM_PRIORITY:
+    # на MEDIUM сервер пакет принимает, но обработчик его не видит.
+    "dialog_response": (REL, PRI_SYS, 0),
+}
+
+_RPC_DELIVERY_DEFAULT = (REL, PRI_MED, 0)
+
+
+def get_delivery_params(
+    packet_name: str | None = None,
+    rpc_name: str | None = None,
+):
+    if rpc_name:
+        reliability, priority, ordering_channel = RPC_DELIVERY.get(
+            rpc_name, _RPC_DELIVERY_DEFAULT
+        )
+        return reliability, priority, ordering_channel
+
+    if packet_name is None:
+        return REL, PRI_HIGH, 0
+
+    return PACKET_DELIVERY.get(packet_name, (REL, PRI_HIGH, 0))
+
+
+class PacketSender:
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def resolve_delivery(
+        self,
+        packet_name: str | None = None,
+        rpc_name: str | None = None,
+    ) -> tuple[int, int, int]:
+        return get_delivery_params(packet_name=packet_name, rpc_name=rpc_name)
+
+    def send(
+        self,
+        payload: bytes,
+        *,
+        packet_name: str | None = None,
+        rpc_name: str | None = None,
+        event_name: str | None = None,
+    ) -> None:
+        if not self._session.connected:
+            return
+
+        reliability, priority, ordering_channel = get_delivery_params(
+            packet_name=packet_name,
+            rpc_name=rpc_name,
+        )
+
+        self._session.protocol.send_with_header(
+            payload,
+            reliability,
+            ordering_channel=ordering_channel,
+            priority=priority,
+        )
+
+        if event_name:
+            self._session._emit_callback(event_name)
