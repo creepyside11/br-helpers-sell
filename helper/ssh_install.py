@@ -16,18 +16,26 @@ ROOT = Path(__file__).resolve().parents[1]
 USERNAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_-]{0,31}\Z")
 
 
-def validate_ssh(host, username, password):
+def validate_ssh_host(host):
     try:
         address = ipaddress.ip_address(host.strip())
     except ValueError:
         raise ValueError("Введи публичный IP VPS без порта.") from None
     if not address.is_global:
         raise ValueError("Требуется публичный IP VPS.")
+    return str(address)
+
+
+def validate_ssh_username(username):
     if not USERNAME.fullmatch(username.strip()):
         raise ValueError("Проверь SSH-логин.")
+    return username.strip()
+
+
+def validate_ssh_password(password):
     if not 1 <= len(password) <= 256 or any(ch in password for ch in ("\x00", "\r", "\n")):
         raise ValueError("Проверь пароль SSH.")
-    return str(address), username.strip(), password
+    return password
 
 
 def _archive(url, token, catalog):

@@ -68,7 +68,11 @@ class TelegramFlowTest(unittest.TestCase):
             url = tg.transcript[-1][2]["inline_keyboard"][0][0]["url"]
             path = "/" + url.split("/", 3)[-1]
             self.assertEqual(web.get(path).status_code, 200)
-            self.assertEqual(web.post(path, headers={"Origin": "null", "Sec-Fetch-Site": "same-origin"}, data={"password": "test&secret?"}).status_code, 200)
+            fields = {"password": "test&secret?"}
+            browser = {"Origin": "null", "Sec-Fetch-Site": "same-origin"}
+            for foreign in ({"Origin": "https://other.example"}, {"Origin": "null", "Sec-Fetch-Site": "cross-site"}):
+                self.assertEqual(web.post(path, headers=foreign, data=fields).status_code, 403)
+            self.assertEqual(web.post(path, headers=browser, data=fields).status_code, 200)
             self.assertEqual(web.get(path).status_code, 404)
             self.assertEqual(web.post(path, data={"password": "second"}).status_code, 400)
             control.message(1, "Емеля", 3)
@@ -98,40 +102,57 @@ class TelegramFlowTest(unittest.TestCase):
                 parse_integer(n, 5, 60)
         control = Controller(FakeDB(), Catalog(), None, FakeTelegram(), 2, "https://helper.example.com")
         control.callback(1, "vps")
-        self.assertFalse(control.forms)
+        self.assertIsNone(control.vps_draft)
         control.callback(2, "vps")
-        self.assertEqual(len(control.forms), 1)
+        self.assertEqual(control.vps_draft.phase, "host")
 
-    def test_vps_form_accepts_ip_login_and_password(self):
-        control = Controller(FakeDB(), Catalog(), None, FakeTelegram(), 2, "https://helper.example.com")
+    def test_admin_vps_chat_checks_input_and_deletes_password_before_installing(self):
+        tg = FakeTelegram()
+        control = Controller(FakeDB(), Catalog(), None, tg, 2, "https://helper.example.com")
+        actions = []
         attempted = threading.Event()
-        with patch.object(control, "_install", side_effect=lambda *_: attempted.set()) as install:
-            with TestClient(create_app(control, run_telegram=False)) as web:
-                control.callback(2, "vps")
-                url = control.tg.transcript[-1][2]["inline_keyboard"][0][0]["url"]
-                path = "/" + url.split("/", 3)[-1]
-                page = web.get(path)
-                self.assertEqual(page.status_code, 200)
-                self.assertNotIn("fingerprint", page.text)
-                fields = {"host": "8.8.8.8", "username": "worker", "password": "fake-password"}
-                browser = {"Origin": "null", "Sec-Fetch-Site": "same-origin"}
-                for foreign in ({"Origin": "https://other.example"}, {"Origin": "null", "Sec-Fetch-Site": "cross-site"}):
-                    self.assertEqual(web.post(path, headers=foreign, data=fields).status_code, 403)
-                invalid = web.post(path, headers=browser, data={**fields, "host": "8.8.8.8:22"})
-                self.assertEqual(invalid.status_code, 400)
-                self.assertIn('value="worker"', invalid.text)
-                self.assertIn("без порта", invalid.text)
-                self.assertNotIn("fake-password", invalid.text)
-                install.assert_not_called()
-                success = web.post(path, headers=browser, data=fields)
-                self.assertEqual(success.status_code, 200)
-                self.assertIn("Установка запущена", success.text)
-                self.assertTrue(attempted.wait(2))
-                install.assert_called_once_with(2, ("8.8.8.8", "worker", "fake-password"))
-                replay = web.post(path, headers=browser, data=fields)
-                self.assertEqual(replay.status_code, 400)
-                self.assertIn("Ссылка уже использована или истекла", replay.text)
-                self.assertNotIn("<form", replay.text)
+
+        def telegram_call(method, **args):
+            if method == "deleteMessage":
+                actions.append(("delete", args))
+            return True
+
+        def install(owner, credentials):
+            actions.append(("install", owner, credentials))
+            attempted.set()
+
+        def send(value, mid, *, private=True):
+            control.handle({"message": {"chat": {"id": 2 if private else -100, "type": "private" if private else "group"},
+                                        "from": {"id": 2}, "text": value, "message_id": mid}})
+
+        with patch.object(control, "_install", side_effect=install), patch.object(tg, "call", side_effect=telegram_call):
+            control.callback(2, "vps")
+            self.assertFalse(control.forms)
+            send("8.8.8.8:22", 1)
+            self.assertIn("без порта", tg.transcript[-1][1])
+            send("8.8.8.8", 2, private=False)
+            self.assertEqual(control.vps_draft.phase, "host")
+            send("8.8.8.8", 3)
+            send("worker", 4)
+            self.assertEqual(control.vps_draft.phase, "password")
+            send(" say&secret ", 5)
+            self.assertTrue(attempted.wait(2))
+            self.assertEqual(actions, [
+                ("delete", {"chat_id": 2, "message_id": 5}),
+                ("install", 2, ("8.8.8.8", "worker", " say&secret ")),
+            ])
+            self.assertIn("Установка запущена", tg.transcript[-1][1])
+            self.assertNotIn("say&secret", repr(tg.transcript))
+            self.assertIsNone(control.vps_draft)
+
+    def test_admin_vps_chat_can_cancel(self):
+        tg = FakeTelegram()
+        control = Controller(FakeDB(), Catalog(), None, tg, 2, "https://helper.example.com")
+        control.callback(2, "vps")
+        control.message(2, "8.8.8.8", 1)
+        control.message(2, "/cancel", 2)
+        self.assertIsNone(control.vps_draft)
+        self.assertIn("отменён", tg.transcript[-1][1])
 
     def test_ssh_install_persists_host_keys_between_calls(self):
         with tempfile.TemporaryDirectory() as data_dir, patch.dict(os.environ, {"DATA_DIR": data_dir}):

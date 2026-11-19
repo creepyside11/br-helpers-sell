@@ -20,10 +20,11 @@ port = s.getsockname()[1]
 url = f"http://127.0.0.1:{port}"
 cipher = Fernet(Fernet.generate_key())
 controller = Controller(MiniDB(), Catalog(), cipher, FakeTelegram(), 2, url)
-vps_started = threading.Event()
-controller._install = lambda *_: vps_started.set()
-controller.callback(2, "vps")
-vps_url = controller.tg.transcript[-1][2]["inline_keyboard"][0][0]["url"]
+controller.message(84, "/new", 1)
+draft = controller.drafts[84]
+controller.callback(84, f"s:{draft.nonce}:7")
+controller.message(84, "Demo_Player", 2)
+game_password_url = controller.tg.transcript[-1][2]["inline_keyboard"][0][0]["url"]
 server = uvicorn.Server(uvicorn.Config(create_app(controller, run_telegram=False, bot_token=TOKEN),
                                        access_log=False, log_level="error"))
 thread = threading.Thread(target=server.run, kwargs={"sockets": [s]}, daemon=True)
@@ -79,18 +80,17 @@ try:
         desktop.set_viewport_size({"width": 320, "height": 790})
         assert desktop.evaluate("document.documentElement.scrollWidth === innerWidth")
         print("Chromium desktop and 320 px: light theme and no horizontal overflow")
-        vps_page = ctx.new_page()
-        vps_page.goto(vps_url)
-        vps_page.get_by_label("Публичный IP VPS").fill("8.8.8.8")
-        vps_page.get_by_label("SSH-логин").fill("worker")
-        vps_page.get_by_label("Пароль").fill("fixture-vps-password")
-        with vps_page.expect_response(lambda response: response.request.method == "POST" and response.url == vps_url) as submitted:
-            vps_page.get_by_role("button", name="Отправить").click()
+        form_page = ctx.new_page()
+        form_page.goto(game_password_url)
+        form_page.get_by_label("Пароль").fill("fixture-game-password")
+        with form_page.expect_response(lambda response: response.request.method == "POST"
+                                       and response.url == game_password_url) as submitted:
+            form_page.get_by_role("button", name="Отправить").click()
         assert submitted.value.request.header_value("origin") == "null"
         assert submitted.value.status == 200
-        expect(vps_page.get_by_text("Установка запущена. Результат придёт в Telegram.")).to_be_visible()
-        assert vps_started.wait(2)
-        print("Chromium VPS form: native POST with Origin null reached the installer")
+        expect(form_page.get_by_text("Пароль сохранён. Вернись в Telegram и введи название предмета.")).to_be_visible()
+        assert draft.phase == "keyword"
+        print("Chromium game account form: native POST with Origin null saved the password")
         browser.close()
 finally:
     server.should_exit = True

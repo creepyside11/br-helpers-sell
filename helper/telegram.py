@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from .common import MAX_PRICE, NICKNAME, game_password, parse_integer, validate_keyword
 from .db import Conflict
-from .ssh_install import install_worker, validate_ssh
+from .ssh_install import install_worker, validate_ssh_host, validate_ssh_password, validate_ssh_username
 
 NEW = "➕ Новый заказ"
 ORDERS = "📋 Мои заказы"
@@ -74,6 +74,7 @@ class Controller:
         self.db, self.catalog, self.cipher, self.tg = db, catalog, cipher, telegram
         self.admin_id, self.public_url = admin_id, public_url
         self.drafts, self.forms = {}, {}
+        self.vps_draft = None
         self.lock = threading.RLock()
         self.install_lock = threading.Lock()
 
@@ -83,19 +84,21 @@ class Controller:
             if draft.expiry <= now:
                 self.drafts.pop(owner, None)
         for token_hash, record in list(self.forms.items()):
-            if record[3] <= now:
+            if record[2] <= now:
                 self.forms.pop(token_hash, None)
+        if self.vps_draft is not None and self.vps_draft.expiry <= now:
+            self.vps_draft = None
 
-    def _form(self, owner, purpose, nonce=""):
+    def _form(self, owner, nonce):
         import hashlib
 
         token = secrets.token_urlsafe(32)
         digest = hashlib.sha256(token.encode()).digest()
         self._sweep()
         for key, record in list(self.forms.items()):
-            if record[:2] == (owner, purpose):
+            if record[0] == owner:
                 self.forms.pop(key)
-        self.forms[digest] = (owner, purpose, nonce, time.monotonic() + TTL)
+        self.forms[digest] = (owner, nonce, time.monotonic() + TTL)
         return f"{self.public_url}/form/{token}"
 
     def _read_form(self, token):
@@ -107,41 +110,63 @@ class Controller:
         digest = hashlib.sha256(token.encode()).digest()
         return digest, self.forms.get(digest)
 
-    def form_kind(self, token):
+    def form_available(self, token):
         with self.lock:
             _, record = self._read_form(token)
-            return record[1] if record else None
+            if record is None:
+                return False
+            owner, nonce, _ = record
+            draft = self.drafts.get(owner)
+            return draft is not None and draft.nonce == nonce and draft.phase == "password"
 
     def submit_form(self, token, fields):
         with self.lock:
             digest, record = self._read_form(token)
             if record is None:
                 raise ValueError("Ссылка истекла. Откройте форму в боте заново.")
-            owner, purpose, nonce, _ = record
-            if purpose == "game":
-                draft = self.drafts.get(owner)
-                if draft is None or draft.nonce != nonce or draft.phase != "password":
-                    raise ValueError("Этот заказ больше не редактируется.")
-                password = game_password(fields.get("password", ""))
-                draft.settings["password_cipher"] = self.cipher.encrypt(password.encode())
-                draft.phase = "keyword"
-                draft.expiry = time.monotonic() + TTL
-                self.forms.pop(digest)
-            else:
-                if owner != self.admin_id:
-                    raise ValueError("Недостаточно прав.")
-                creds = validate_ssh(*(fields.get(k, "") for k in ("host", "username", "password")))
-                if not self.install_lock.acquire(blocking=False):
-                    raise ValueError("Уже выполняется установка. Подожди её завершения.")
-                self.forms.pop(digest)
-                threading.Thread(target=self._install, args=(owner, creds), daemon=True).start()
-        if purpose == "game":
+            owner, nonce, _ = record
+            draft = self.drafts.get(owner)
+            if draft is None or draft.nonce != nonce or draft.phase != "password":
+                raise ValueError("Этот заказ больше не редактируется.")
+            password = game_password(fields.get("password", ""))
+            draft.settings["password_cipher"] = self.cipher.encrypt(password.encode())
+            draft.phase = "keyword"
+            draft.expiry = time.monotonic() + TTL
+            self.forms.pop(digest)
+        try:
+            self.tg.send(owner, "Пароль сохранён для этого заказа. Введи название предмета или ключевое слово, например Емеля.")
+        except TelegramError:
+            pass
+        return "Пароль сохранён. Вернись в Telegram и введи название предмета."
+
+    def _vps_message(self, owner, draft, raw, message_id):
+        draft.expiry = time.monotonic() + TTL
+        if draft.phase == "host":
+            draft.settings["host"] = validate_ssh_host(raw)
+            draft.phase = "username"
+            self.tg.send(owner, "Введи SSH-логин, например root.")
+        elif draft.phase == "username":
+            draft.settings["username"] = validate_ssh_username(raw)
+            draft.phase = "password"
+            self.tg.send(owner, "Отправь пароль SSH одним сообщением. Бот попытается сразу удалить его из чата.",
+                         {"force_reply": True, "input_field_placeholder": "Пароль SSH"})
+        else:
             try:
-                self.tg.send(owner, "Пароль сохранён для этого заказа. Введи название предмета или ключевое слово, например Емеля.")
+                deleted = self.tg.call("deleteMessage", chat_id=owner, message_id=message_id) is True
             except TelegramError:
-                pass
-            return "Пароль сохранён. Вернись в Telegram и введи название предмета."
-        return "Установка запущена. Результат придёт в Telegram."
+                deleted = False
+            if not deleted:
+                self.tg.send(owner, "Telegram не удалил сообщение с паролем. Удали его из чата вручную.")
+            creds = (draft.settings["host"], draft.settings["username"], validate_ssh_password(raw))
+            if not self.install_lock.acquire(blocking=False):
+                raise ValueError("Уже выполняется установка. Подожди её завершения.")
+            try:
+                threading.Thread(target=self._install, args=(owner, creds), daemon=True).start()
+            except RuntimeError:
+                self.install_lock.release()
+                raise ValueError("Не удалось запустить установку. Попробуй ещё раз.") from None
+            self.vps_draft = None
+            self.tg.send(owner, "Установка запущена. Результат придёт сюда.")
 
     def _install(self, owner, credentials):
         worker = None
@@ -241,6 +266,15 @@ class Controller:
     def message(self, owner, raw, message_id):
         value = raw.strip()
         cmd = value.split(maxsplit=1)[0].split("@", 1)[0] if value.startswith("/") else ""
+        if owner == self.admin_id and self.vps_draft is not None:
+            if cmd in ("/cancel", "/start", "/admin", "/new", "/orders"):
+                self.vps_draft = None
+                if cmd == "/cancel":
+                    self.tg.send(owner, "Ввод данных VPS отменён.")
+                    return
+            else:
+                self._vps_message(owner, self.vps_draft, raw, message_id)
+                return
         if cmd == "/start":
             self.start(owner)
             return
@@ -276,7 +310,7 @@ class Controller:
                     self.tg.call("deleteMessage", chat_id=owner, message_id=message_id)
                 except TelegramError:
                     pass
-            url = self._form(owner, "game", draft.nonce)
+            url = self._form(owner, draft.nonce)
             self.tg.send(owner, "Введи пароль от своего аккаунта 3+ уровня в одноразовой форме. Пароль будет передан воркеру на VPS для входа и удалён из очереди.",
                          buttons([{"text": "Ввести пароль", "url": url}]))
         elif p == "keyword":
@@ -317,9 +351,11 @@ class Controller:
             return
         if data == "vps":
             if owner == self.admin_id:
-                url = self._form(owner, "vps")
-                self.tg.send(owner, "Заполни IP, SSH-логин и пароль от VPS.",
-                             buttons([{"text": "Открыть форму VPS", "url": url}]))
+                if self.install_lock.locked():
+                    self.tg.send(owner, "Уже выполняется установка. Подожди её завершения.")
+                else:
+                    self.vps_draft = Draft("host")
+                    self.tg.send(owner, "Введи публичный IP VPS без порта. Для отмены отправь /cancel.")
             return
         parts = data.split(":")
         if len(parts) == 2 and parts[0] in ("list", "ord", "stop"):
