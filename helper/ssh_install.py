@@ -57,7 +57,7 @@ def _archive(url, token, catalog):
     return archive.getvalue()
 
 
-def install_worker(host, username, password, url, token, catalog=""):
+def install_worker(host, username, password, url, token, catalog="", *, replace_existing=False):
     ssh_dir = data_directory() / "ssh"
     ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     known_path = ssh_dir / "known_hosts"
@@ -90,6 +90,8 @@ tar -xzf - -C "$d"
 cd "$d"
 sh deploy/install_worker.sh
 """
+        if replace_existing:
+            script = script.replace("sh deploy/install_worker.sh", "sh deploy/install_worker.sh --replace")
         command = ("" if username == "root" else "sudo -n ") + "sh -c " + shlex.quote(script)
         args = ["ssh", "-F", "/dev/null", "-T", "-p", "22"]
         for key, value in options.items():

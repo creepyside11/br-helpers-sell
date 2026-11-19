@@ -5,7 +5,7 @@ import threading
 import tarfile
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, run
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -165,6 +165,53 @@ class TelegramFlowTest(unittest.TestCase):
                 for call in run.call_args_list:
                     self.assertIn(f"UserKnownHostsFile={known_hosts}", call.args[0])
                     self.assertIn("StrictHostKeyChecking=accept-new", call.args[0])
+
+
+    def test_install_waits_for_worker_and_offline_worker_can_be_replaced(self):
+        db = FakeDB()
+        tg = FakeTelegram()
+        control = Controller(db, Catalog(), None, tg, 2, "https://helper.example.com")
+        db.prepare_worker_install = lambda _: ("new-id", "fixture-token", True, ["old-id"])
+        with patch("helper.telegram.install_worker") as install, patch.object(control, "_wait_for_worker") as wait:
+            for error in (RuntimeError("Воркер не связался с Helper."), None):
+                wait.side_effect = error
+                control.install_lock.acquire()
+                control._install(2, ("8.8.8.8", "worker", "fake-password"))
+                self.assertTrue(install.call_args.kwargs["replace_existing"])
+                self.assertEqual(wait.call_args.args, ("new-id",))
+                self.assertIn("не связался" if error else "вышел на связь", tg.transcript[-1][1])
+                self.assertFalse(control.install_lock.locked())
+
+    def test_worker_install_repairs_permissions_without_exposing_environment(self):
+        with tempfile.TemporaryDirectory() as staging:
+            root = Path(staging)
+            workdir = root / "opt"
+            workdir.mkdir()
+            for folder in ("helper", "runtime"):
+                package = root / folder
+                package.mkdir()
+                (package / "fixture.py").write_text("pass")
+                old = workdir / folder
+                old.mkdir(mode=0o700)
+                (old / "fixture.py").write_text("pass")
+                (old / "fixture.py").chmod(0o600)
+            (root / "worker.env").write_text("WORKER_TOKEN=fixture")
+            (root / "systemd").mkdir()
+            systemctl = root / "systemctl"
+            systemctl.write_text("#!/bin/sh\nexit 0\n")
+            systemctl.chmod(0o700)
+            script = (Path(__file__).resolve().parents[1] / "deploy/install_worker.sh").read_text()
+            for original, target in (("/opt/rakcrmp-helper-worker", workdir),
+                                     ("/etc/rakcrmp-helper", root / "etc"),
+                                     ("/etc/systemd/system", root / "systemd")):
+                script = script.replace(original, str(target))
+            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}")
+            result = run(["sh", "-c", "umask 077\n" + script, "installer", "--replace"],
+                         cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((workdir / "helper").stat().st_mode & 0o077, 0o055)
+            self.assertEqual((workdir / "runtime" / "fixture.py").stat().st_mode & 0o077, 0o044)
+            self.assertEqual((root / "etc" / "worker.env").stat().st_mode & 0o777, 0o600)
 
 
 class ReplayGame:
@@ -343,3 +390,21 @@ class PostgresFlowTest(unittest.TestCase):
         db.disable(worker)
         with self.assertRaises(PermissionError):
             db.claim(token)
+
+        with db.cursor() as cur:
+            cur.execute("UPDATE helper_workers SET enabled=TRUE, seen_at=now() WHERE id=%s", (worker,))
+        with self.assertRaisesRegex(Conflict, "уже в сети"):
+            db.prepare_worker_install("vps")
+        with db.cursor() as cur:
+            cur.execute("UPDATE helper_workers SET seen_at=now()-interval '2 minutes' WHERE id=%s", (worker,))
+        replacement, fresh_token, replace, previous = db.prepare_worker_install("vps")
+        self.assertTrue(replace)
+        self.assertEqual(previous, [worker])
+        self.assertFalse(db.worker_connected(replacement))
+        with self.assertRaises(PermissionError):
+            db.claim(token)
+        self.assertIsNone(db.claim(fresh_token))
+        self.assertTrue(db.worker_connected(replacement))
+        db.cancel_worker_install(replacement, previous)
+        self.assertIsNone(db.claim(token))
+        self.assertTrue(db.worker_connected(worker))

@@ -91,13 +91,53 @@ class Database:
             """, (user_id, order_id))
             return cur.fetchone()
 
-    def enroll(self, label):
+    @staticmethod
+    def _enroll(cur, label):
         token = secrets.token_urlsafe(36)
         worker = str(uuid4())
-        with self.cursor() as cur:
-            cur.execute("INSERT INTO helper_workers(id,label,token_hash) VALUES (%s,%s,%s)",
-                        (worker, label, hashlib.sha256(token.encode()).digest()))
+        cur.execute("INSERT INTO helper_workers(id,label,token_hash) VALUES (%s,%s,%s)",
+                    (worker, label, hashlib.sha256(token.encode()).digest()))
         return worker, token
+
+    def enroll(self, label):
+        with self.cursor() as cur:
+            return self._enroll(cur, label)
+
+    def prepare_worker_install(self, label):
+        with self.cursor() as cur:
+            cur.execute("""
+              SELECT id, enabled, seen_at > now()-interval '35 seconds' AS online
+              FROM helper_workers WHERE label=%s ORDER BY id FOR UPDATE
+            """, (label,))
+            previous = cur.fetchall()
+            if any(row["enabled"] and row["online"] for row in previous):
+                raise Conflict("Воркер на этом VPS уже в сети.")
+            cur.execute("""
+              SELECT EXISTS(
+                SELECT 1 FROM helper_orders o JOIN helper_workers w ON w.id=o.worker_id
+                WHERE w.label=%s AND o.status='running' AND o.lease_until>now()
+              ) AS busy
+            """, (label,))
+            if cur.fetchone()["busy"]:
+                raise Conflict("На этом VPS ещё выполняется заказ. Подожди его завершения.")
+            enabled = [str(row["id"]) for row in previous if row["enabled"]]
+            cur.execute("UPDATE helper_workers SET enabled=FALSE WHERE id=ANY(%s::uuid[])", (enabled,))
+            worker, token = self._enroll(cur, label)
+            return worker, token, bool(previous), enabled
+
+    def worker_connected(self, worker):
+        with self.cursor() as cur:
+            cur.execute("""
+              SELECT 1 FROM helper_workers
+              WHERE id=%s AND enabled AND seen_at > now()-interval '35 seconds'
+            """, (worker,))
+            return cur.fetchone() is not None
+
+    def cancel_worker_install(self, worker, previously_enabled):
+        with self.cursor() as cur:
+            cur.execute("UPDATE helper_workers SET enabled=FALSE WHERE id=%s", (worker,))
+            cur.execute("UPDATE helper_workers SET enabled=TRUE WHERE id=ANY(%s::uuid[])",
+                        (previously_enabled,))
 
     def disable(self, worker):
         with self.cursor() as cur:

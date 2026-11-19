@@ -168,25 +168,39 @@ class Controller:
             self.vps_draft = None
             self.tg.send(owner, "Установка запущена. Результат придёт сюда.")
 
+    def _wait_for_worker(self, worker, timeout=30):
+        deadline = time.monotonic() + timeout
+        while not self.db.worker_connected(worker):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Служба запущена на VPS, но воркер не связался с Helper за 30 секунд.")
+            time.sleep(min(1, remaining))
+
     def _install(self, owner, credentials):
         worker = None
+        previous = []
+        installed = False
         try:
-            worker, token = self.db.enroll(credentials[0])
-            install_worker(*credentials, self.public_url, token, os.environ.get("BR_SERVERS_URL", ""))
-        except (RuntimeError, OSError, ValueError) as exc:
-            if worker is not None:
-                self.db.disable(worker)
-            message = str(exc) if isinstance(exc, RuntimeError) else "Не удалось установить воркер. Проверь доступ к VPS."
-        except Exception:
-            message = "Не удалось зарегистрировать воркер."
-            if worker is not None:
-                try:
-                    self.db.disable(worker)
-                except Exception:
-                    pass
+            worker, token, replace_existing, previous = self.db.prepare_worker_install(credentials[0])
+            install_worker(*credentials, self.public_url, token, os.environ.get("BR_SERVERS_URL", ""),
+                           replace_existing=replace_existing)
+            installed = True
+            self._wait_for_worker(worker)
+        except (Conflict, RuntimeError) as exc:
+            message = str(exc)
+        except (OSError, ValueError):
+            message = "Не удалось установить воркер. Проверь доступ к VPS."
+        except Exception as exc:
+            print(f"Worker install failed ({type(exc).__name__})", flush=True)
+            message = "Не удалось завершить проверку установки воркера."
         else:
-            message = "Воркер установлен и запущен. Статус подключения смотри в /admin."
+            message = "Воркер установлен и вышел на связь с Helper."
         finally:
+            if worker is not None and not installed:
+                try:
+                    self.db.cancel_worker_install(worker, previous)
+                except Exception as exc:
+                    print(f"Worker install cleanup failed ({type(exc).__name__})", flush=True)
             self.install_lock.release()
         try:
             self.tg.send(owner, message)
